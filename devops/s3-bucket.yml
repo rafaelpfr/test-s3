@@ -1,0 +1,57 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Setup a S3 bucket to be used as static website
+
+Parameters:
+  EnvName:
+    Type: String
+
+  TypeProject:
+    Type: String
+
+Resources:
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Sub ${EnvName}-${TypeProject}-bucket
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  CfnOAI:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: !Sub 'cfn-oai-cloudfront-${TypeProject}'
+
+  S3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties: 
+      Bucket: !Ref S3Bucket
+      PolicyDocument: 
+        Statement: 
+          - Action: 
+              - "s3:GetObject"
+            Effect: "Allow"
+            Resource: 
+              Fn::Join: 
+                - ""
+                - 
+                  - "arn:aws:s3:::"
+                  - 
+                    Ref: "S3Bucket"
+                  - "/*"
+            Principal:
+              CanonicalUser: !GetAtt CfnOAI.S3CanonicalUserId
+
+Outputs:
+  S3DomainName:
+    Value: !GetAtt S3Bucket.RegionalDomainName
+    Export:
+      Name: !Sub ${EnvName}-${TypeProject}-S3DomainName
+  OAIId:
+    Value: !Ref CfnOAI
+    Export:
+      Name: !Sub ${EnvName}-${TypeProject}-OAI

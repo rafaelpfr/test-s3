@@ -1,0 +1,380 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Sets up cloudfront
+
+Parameters:
+  Provider:
+    Type: String
+    Description: Repository Provider
+    Default: GitHub
+
+  ProviderRepo:
+    Type: String
+    Description: AWS provider repository
+    AllowedValues:
+      - "theta-training-camp"
+    Default: theta-training-camp
+
+  ProviderBranch:
+    Type: String
+    Description: The branch to use for the provider repository.
+    Default: rafael-franca-s3
+
+  ProviderToken:
+    Type: String
+    Description: The token used to authenticate with the provider.
+    NoEcho: true
+
+  Owner:
+    Type: String
+    Description: The owner of the repository.
+    Default: ezops-br
+
+  EnvName:
+    Default: dev-rafael-franca-s3
+    Type: String
+
+  CustomSiteName:
+    Type: String
+    Default: S3-client-cloudfront
+    Description: The name of the custom site.
+
+  DnsName:
+    Type: String
+    Default: rafael-franca-s3.dev.ezops.com.br
+    Description: The dns name.
+
+  DefaultAcmCertificateArn:
+    Type: String
+    Default: arn:aws:acm:us-east-1:975635808270:certificate/dff8ed1e-8f8e-4a08-af26-d194758eac18
+    Description: The default certificate arn.
+    NoEcho: true
+
+  HostedZoneId:
+    Type: String
+    Default: ZG6FMT2OAHQ5L
+    Description: The hosted zone id.
+    NoEcho: true
+
+  TypeProject:  
+    Type: String
+    Default: treino
+    Description: The type of project to create.
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+    - Label:
+        default: Codepipeline General Params
+      Parameters:
+        - Owner
+        - Provider
+        - ProviderRepo
+        - ProviderBranch
+        - ProviderToken
+    - Label:
+        default: S3 General Params
+      Parameters:
+        - EnvName
+        - DnsName
+        - TypeProject
+    - Label:
+        default: CloudFront Params
+      Parameters:
+        - CustomSiteName
+        - DefaultAcmCertificateArn
+        - CustomDomainName 
+    - Label:
+        default: Route53 Params
+      Parameters:
+        - HostedZoneId
+  
+Resources:
+  CloudFormationExecutionRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    Properties:
+      RoleName: !Sub cfn-${AWS::StackName}
+      Path: /
+      AssumeRolePolicyDocument: |
+        {
+          "Statement": [{
+            "Effect": "Allow",
+            "Principal": { "Service": [ "cloudformation.amazonaws.com" ]},
+            "Action": [ "sts:AssumeRole" ]
+          }]
+        }
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Resource: "*"
+                Effect: Allow
+                Action:
+                  - iam:*
+                  - ssm:*
+                  - s3:*
+                  - cloudfront:*
+                  - route53:*
+                  - secretsmanager:GetSecretValue
+
+  CodeBuildServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub cb-${AWS::StackName}
+      Path: /
+      AssumeRolePolicyDocument: |
+        {
+          "Statement": [{
+            "Effect": "Allow",
+            "Principal": { "Service": [ "codebuild.amazonaws.com" ]},
+            "Action": [ "sts:AssumeRole" ]
+          }]
+        }
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Resource: "*"
+                Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - ec2:*
+                  - s3:*
+                  - ssm:*
+                  - cloudfront:*
+
+  CodePipelineServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub cp-${AWS::StackName}
+      Path: /
+      AssumeRolePolicyDocument: |
+        {
+          "Statement": [{
+            "Effect": "Allow",
+            "Principal": { "Service": [ "codepipeline.amazonaws.com" ]},
+            "Action": [ "sts:AssumeRole" ]
+          }]
+        }
+      Policies:
+        - PolicyName: root
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Resource: arn:aws:s3:::*
+                Effect: Allow
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketVersioning
+              - Resource: "*"
+                Effect: Allow
+                Action:
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuilds
+                  - cloudformation:*
+                  - cloudwatch:*
+                  - events:*
+                  - iam:PassRole
+                  - ec2:*
+                  - cloudfront:*
+                  - ssm:*
+                  - secretsmanager:GetSecretValue
+
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties: 
+      BucketName: !Sub ${TypeProject}-${EnvName}-website
+	    PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  CodeBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Ref AWS::StackName
+      ServiceRole: !Ref CodeBuildServiceRole
+      Artifacts:
+        Location: !Ref ArtifactBucket
+        Type: "S3"
+      Source:
+        Location: !Sub ${ArtifactBucket}/source.zip
+        Type: "S3"
+        BuildSpec: !Sub |
+          version: 0.2
+          phases:
+            pre_build:
+              commands:
+                - aws s3 sync app s3://${EnvName}-${TypeProject}-bucket/
+                - CLOUDFRONT_ID=`aws ssm get-parameter --region ${AWS::Region} --with-decryption --name /CLIENT/${EnvName}/CLOUDFRONT_ID --output text --query Parameter.Value` 
+                - echo $CLOUDFRONT_ID
+                - aws cloudfront create-invalidation --distribution-id $CLOUDFRONT_ID --paths '/*'
+      Environment:
+        ComputeType: "BUILD_GENERAL1_LARGE"
+        Image: "aws/codebuild/standard:5.0"
+        Type: "LINUX_CONTAINER"
+        PrivilegedMode: true
+
+  Pipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Sub ${TypeProject}-${EnvName}
+      RoleArn: !GetAtt CodePipelineServiceRole.Arn
+      ArtifactStore:
+        Type: S3
+        Location: !Ref ArtifactBucket
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: App
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Version: '1'
+                Provider: !Ref Provider
+              Configuration:
+                Owner: !Ref Owner
+                Repo: !Ref ProviderRepo
+                Branch: !Ref ProviderBranch
+                OAuthToken: !Ref ProviderToken
+              OutputArtifacts:
+                - Name: App
+              RunOrder: 1
+
+
+        - Name: Build
+          Actions:
+            - Name: Build
+              InputArtifacts:
+                - Name: App
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: '1'
+                Provider: CodeBuild
+              Configuration:
+                ProjectName: !Ref CodeBuildProject
+                PrimarySource: App
+              RunOrder: 2
+
+
+        - Name: ChangeSet
+          Actions:
+            - Name: CreateS3BucketChangeSet
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: '1'
+                Provider: CloudFormation
+              Configuration:
+                ChangeSetName: Deploy
+                ActionMode: CHANGE_SET_REPLACE
+                StackName: !Sub ${EnvName}-${TypeProject}-service-s3-website
+                Capabilities: CAPABILITY_NAMED_IAM
+                TemplatePath: App::devops/s3-bucket.yml
+                RoleArn: !GetAtt CloudFormationExecutionRole.Arn
+                ParameterOverrides: !Sub |
+                  {
+                    "EnvName": "${EnvName}",
+                    "TypeProject": "${TypeProject}"
+                  }
+              RunOrder: 3
+              InputArtifacts:
+                - Name: App
+
+            - Name: ExecuteS3BucketChangeSet
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: '1'
+                Provider: CloudFormation
+              Configuration:
+                ChangeSetName: Deploy
+                ActionMode: CHANGE_SET_EXECUTE
+                StackName: !Sub ${EnvName}-${TypeProject}-service-s3-website
+                RoleArn: !GetAtt CloudFormationExecutionRole.Arn
+              RunOrder: 4
+
+            - Name: CreateCloudfrontChangeSet
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: '1'
+                Provider: CloudFormation
+              Configuration:
+                ChangeSetName: Deploy
+                ActionMode: CHANGE_SET_REPLACE
+                StackName: !Sub ${EnvName}-${TypeProject}-service-cloudfront
+                Capabilities: CAPABILITY_NAMED_IAM
+                TemplatePath: App::devops/cloudfront.yml
+                RoleArn: !GetAtt CloudFormationExecutionRole.Arn
+                ParameterOverrides: !Sub |
+                  {
+                    "EnvName": "${EnvName}",
+                    "TypeProject": "${TypeProject}",
+                    "CustomSiteName": "${CustomSiteName}",
+                    "DnsName": "${DnsName}",
+                    "DefaultAcmCertificateArn": "${DefaultAcmCertificateArn}"
+                  }
+              RunOrder: 5
+              InputArtifacts:
+                - Name: App
+
+            - Name: ExecuteCloudfrontChangeSet
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: '1'
+                Provider: CloudFormation
+              Configuration:
+                ChangeSetName: Deploy
+                ActionMode: CHANGE_SET_EXECUTE
+                StackName: !Sub ${EnvName}-${TypeProject}-service-cloudfront
+                RoleArn: !GetAtt CloudFormationExecutionRole.Arn
+              RunOrder: 6
+
+            - Name: CreateRoute53ChangeSet
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: '1'
+                Provider: CloudFormation
+              Configuration:
+                ChangeSetName: Deploy
+                ActionMode: CHANGE_SET_REPLACE
+                StackName: !Sub ${EnvName}-${TypeProject}-service-route53
+                Capabilities: CAPABILITY_NAMED_IAM
+                TemplatePath: App::devops/route53.yml
+                RoleArn: !GetAtt CloudFormationExecutionRole.Arn
+                ParameterOverrides: !Sub |
+                  {
+                    "EnvName": "${EnvName}",
+                    "TypeProject": "${TypeProject}",
+                    "DnsName": "${DnsName}",
+                    "HostedZoneId": "${HostedZoneId}"
+                  }
+              RunOrder: 7
+              InputArtifacts:
+                - Name: App
+
+            - Name: ExecuteRoute53ChangeSet
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Version: '1'
+                Provider: CloudFormation
+              Configuration:
+                ChangeSetName: Deploy
+                ActionMode: CHANGE_SET_EXECUTE
+                StackName: !Sub ${EnvName}-${TypeProject}-service-route53
+                RoleArn: !GetAtt CloudFormationExecutionRole.Arn
+              RunOrder: 8
+     

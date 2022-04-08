@@ -1,0 +1,73 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Setup a Cloudfront for the S3 static website
+
+Parameters:
+  EnvName:
+    Type: String
+
+  CustomSiteName:
+    Type: String
+  
+  TypeProject:
+    Type: String
+
+  DefaultAcmCertificateArn:
+    Type: String
+
+  DnsName:
+    Type: String
+
+Resources:
+  CfnDistribution:
+    Type: 'AWS::CloudFront::Distribution'
+    Properties:
+      DistributionConfig:
+        Origins:
+          - DomainName:
+              Fn::ImportValue: !Sub "${EnvName}-${TypeProject}-S3DomainName"
+            Id: !Ref CustomSiteName
+            S3OriginConfig:
+              OriginAccessIdentity: !Join ['', ['origin-access-identity/cloudfront/', Fn::ImportValue: !Sub "${EnvName}-${TypeProject}-OAI"]]
+        Enabled: true
+        Aliases:
+          - !Sub ${DnsName}
+        CustomErrorResponses:
+          - ErrorCode: 403 # 404 
+            ResponseCode: 404
+            ResponsePagePath: /index.html
+        HttpVersion: http2
+        PriceClass: PriceClass_All
+        DefaultRootObject: index.html
+        DefaultCacheBehavior:
+          AllowedMethods:
+            - GET
+            - HEAD
+          Compress: false
+          TargetOriginId: !Ref CustomSiteName
+          SmoothStreaming: false
+          ForwardedValues:
+            QueryString: true
+            Cookies:
+              Forward: all
+          ViewerProtocolPolicy: redirect-to-https
+        ViewerCertificate:
+          SslSupportMethod: sni-only
+          # Reference:
+          # https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/cnames-and-https-requirements.html
+          # To use an ACM certificate with CloudFront, make sure you request (or import) the certificate in the US East (N. Virginia) Region ( us-east-1 )
+          AcmCertificateArn: !Ref DefaultAcmCertificateArn
+          MinimumProtocolVersion: TLSv1.1_2016
+
+  SsmCloudfrontId:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: !Sub /CLIENT/${EnvName}/CLOUDFRONT_ID
+      Value: !Ref CfnDistribution
+      Type: String
+
+Outputs:
+  CfnDistribution:
+    Description: DNS Name of Cloudfront Distribution
+    Value: !Sub ${CfnDistribution.DomainName}
+    Export:
+      Name: !Sub  ${EnvName}-${TypeProject}-CfnDistribution
